@@ -23,6 +23,7 @@ DARK_GRAY = (20, 20, 20)
 LIGHT_GRAY = (200, 200, 200)
 ORANGE = (255, 165, 0)
 CYAN = (0, 255, 255)
+YELLOW = (255, 255, 0)
 
 clock = pygame.time.Clock()
 FPS = 60
@@ -42,6 +43,7 @@ try:
     boss_dash_sound = pygame.mixer.Sound("boss_dash.wav")
     projectile_sound = pygame.mixer.Sound("projectile.wav")
     hazard_sound = pygame.mixer.Sound("hazard.wav")
+    laser_sound = pygame.mixer.Sound("hazard.wav")  
 except FileNotFoundError:
     dummy_array = np.zeros((44100, 2), dtype=np.int16)
     dummy_sound = pygame.mixer.Sound(pygame.sndarray.make_sound(dummy_array))
@@ -55,6 +57,7 @@ except FileNotFoundError:
     boss_dash_sound = dummy_sound
     projectile_sound = dummy_sound
     hazard_sound = dummy_sound
+    laser_sound = dummy_sound
 
 class ParticleSystem:
     def __init__(self):
@@ -184,8 +187,14 @@ class ArenaHazard:
         self.colors = {
             'spike': (150, 150, 150),  
             'fire': (255, 100, 0),     
-            'poison': (0, 180, 0)      
+            'poison': (0, 180, 0),
+            'laser': (255, 0, 0),
         }
+
+        
+        self.moving = False
+        self.vel_x = 0
+        self.vel_y = 0
     
     def update(self):
         self.lifetime -= 1
@@ -193,6 +202,17 @@ class ArenaHazard:
         if self.lifetime <= self.max_lifetime - self.warning_time and not self.active:
             self.active = True
             hazard_sound.play()
+        
+        
+        if self.moving and self.active:
+            self.x += self.vel_x
+            self.y += self.vel_y
+            
+            
+            if self.x <= 0 or self.x + self.width >= SCREEN_WIDTH:
+                self.vel_x *= -1
+            if self.y <= 0 or self.y + self.height >= SCREEN_HEIGHT - 100:
+                self.vel_y *= -1
         
         if self.active and random.random() < 0.2:
             self.particles.add_particles(
@@ -227,6 +247,89 @@ class ArenaHazard:
         surface.blit(hazard_surface, (self.x, self.y))
         
         pygame.draw.rect(surface, color, (self.x, self.y, self.width, self.height), 2)
+        
+        self.particles.draw(surface)
+    
+    def get_rect(self):
+        return pygame.Rect(self.x, self.y, self.width, self.height)
+
+class Laser:
+    def __init__(self, x, y, speed, damage, lifetime=180, warning_time=60):
+        self.x = x
+        self.y = y
+        self.speed = speed
+        self.damage = damage
+        self.lifetime = lifetime
+        self.max_lifetime = lifetime
+        self.warning_time = warning_time
+        self.active = False
+        self.particles = ParticleSystem()
+        self.warning_shown = False  
+        
+       
+        self.width = 10
+        self.height = SCREEN_HEIGHT - 100
+    
+    def update(self):
+        self.lifetime -= 1
+        
+        if self.lifetime <= self.max_lifetime - self.warning_time and not self.active:
+            self.active = True
+            self.warning_shown = True  
+            laser_sound.play()
+        
+        
+        if self.active:
+            self.x += self.speed
+            if self.x < 0 or self.x + self.width > SCREEN_WIDTH:
+                self.speed *= -1
+        
+        
+        if self.active and random.random() < 0.3:
+            particle_x = self.x + self.width / 2
+            particle_y = random.uniform(self.y, self.y + self.height)
+                
+            self.particles.add_particles(
+                particle_x, particle_y,
+                (255, 0, 0),  
+                count=2,
+                speed=1,
+                size_range=(1, 3),
+                lifetime_range=(5, 15)
+            )
+        
+        self.particles.update()
+        
+        return self.lifetime <= 0
+    
+    def draw(self, surface):
+        if not self.active:
+            
+            if (self.max_lifetime - self.lifetime) % 10 < 5:
+                alpha = 0.4
+            else:
+                alpha = 0.1
+                
+            laser_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            color = (255, 0, 0, int(255 * alpha))  
+            pygame.draw.rect(laser_surface, color, (0, 0, self.width, self.height))
+            
+            surface.blit(laser_surface, (self.x, self.y))
+            
+            
+            pygame.draw.rect(surface, (255, 0, 0), (self.x, self.y, self.width, self.height), 1)
+        else:
+            
+            laser_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            color = (255, 0, 0, 150)  
+            pygame.draw.rect(laser_surface, color, (0, 0, self.width, self.height))
+            
+            surface.blit(laser_surface, (self.x, self.y))
+            
+            
+            pygame.draw.line(surface, (255, 200, 200), 
+                            (self.x + self.width//2, self.y), 
+                            (self.x + self.width//2, self.y + self.height), 3)
         
         self.particles.draw(surface)
     
@@ -271,7 +374,7 @@ class Boss:
         self.adaptation_display_time = 0
         self.particles = ParticleSystem()
         
-       
+        
         self.decision_timer = 0
         self.decision_timer_max = 30
         self.current_decision = 'idle'
@@ -292,11 +395,7 @@ class Boss:
         self.current_phase_message = ""
         self.attack_delay = 0
         self.dash_preference = 1.0
-        self.counter_attacks = False
         self.tracking_intensity = 0.5
-        self.isInCounterStance = False
-        self.counterStanceTimer = 0
-        self.counterStanceDuration = 120
         self.playerAttackPattern = []
         self.patternFrequency = {}
         
@@ -305,15 +404,13 @@ class Boss:
         self.phase_shift_threshold = [0.75, 0.5, 0.25]  
         self.phase_shifting = False
         self.phase_shift_timer = 0
-        self.phase_shift_duration = 180 
+        self.phase_shift_duration = 600  
         self.phase_shift_invulnerable = False
-        self.phase_shift_pulse_radius = 0
-        self.phase_shift_max_radius = 150
-        self.phase_shift_damage = 20
-        self.teleport_target_x = 0
-        self.teleport_target_y = 0
+        self.is_visible = True
+        self.reappear_portal_active = False
+        self.reappear_portal_timer = 0
+        self.reappear_portal_duration = 60  
         
-       
         self.projectiles = []
         self.projectile_cooldown = 0
         self.projectile_patterns = [
@@ -328,7 +425,7 @@ class Boss:
         self.barrage_count = 0
         self.barrage_timer = 0
         
-       
+        
         self.hazards = []
         self.hazard_cooldown = 0
         self.hazard_cooldown_max = 300  
@@ -340,6 +437,9 @@ class Boss:
             'walls'       
         ]
         self.current_hazard_pattern = 'random'
+        
+        
+        self.lasers = []
 
     def get_rect(self):
         return pygame.Rect(self.x, self.y, self.width, self.height)
@@ -360,7 +460,7 @@ class Boss:
         
         clamped_damage = min(amount, 10)
         
-        if not self.isInCounterStance and self.invincibility <= 0:
+        if self.invincibility <= 0:
             prev_health_percentage = self.health / self.max_health
             
             self.health -= clamped_damage
@@ -391,16 +491,20 @@ class Boss:
             self.phase_shifting = True
             self.phase_shift_timer = 0
             self.phase_shift_invulnerable = True
-            self.phase_shift_pulse_radius = 0
             self.phase += 1
+            self.is_visible = False
+            self.reappear_portal_active = False
             
-            self.teleport_target_x = random.randint(100, SCREEN_WIDTH - 100)
-            self.teleport_target_y = SCREEN_HEIGHT - 170  
+            
+            self.create_phase_shift_lasers()
             
             self.speed += 0.5
             self.aggression += 0.1
             self.attack_cooldown_max = max(5, self.attack_cooldown_max - 2)
             self.dash_cooldown_max = max(30, self.dash_cooldown_max - 10)
+            
+            
+            self.hazard_cooldown_max = max(150, self.hazard_cooldown_max - 50)
             
             if self.phase == 2:
                 self.current_projectile_pattern = 'triple'
@@ -416,44 +520,25 @@ class Boss:
             
             self.current_phase_message = f"Phase {self.phase}: {random.choice(self.phase_messages)}"
             self.adaptation_display_time = 180  
-
-    def update_phase_shift(self):
-        if not self.phase_shifting:
-            return
-            
-        self.phase_shift_timer += 1
+    
+    def create_phase_shift_lasers(self):
+       
+        self.hazards.clear()
+        self.lasers.clear()
+        self.projectiles.clear()
         
-        if self.phase_shift_timer < self.phase_shift_duration / 2:
-            self.phase_shift_pulse_radius = (self.phase_shift_timer / (self.phase_shift_duration / 2)) * self.phase_shift_max_radius
-            
-            for _ in range(5):
-                angle = random.uniform(0, math.pi * 2)
-                particle_x = self.x + self.width / 2 + math.cos(angle) * self.phase_shift_pulse_radius
-                particle_y = self.y + self.height / 2 + math.sin(angle) * self.phase_shift_pulse_radius
+       
+        num_lasers = min(4, 2 + self.phase)  
+        for _ in range(num_lasers):
+            x = random.randint(50, SCREEN_WIDTH - 100)
+            speed = random.choice([-4, -3, 3, 4])  
                 
-                self.particles.add_particles(
-                    particle_x, particle_y,
-                    PURPLE,
-                    count=1,
-                    speed=1,
-                    size_range=(2, 5),
-                    lifetime_range=(20, 40)
-                )
-        elif self.phase_shift_timer >= self.phase_shift_duration:
-            self.x = self.teleport_target_x
-            self.y = self.teleport_target_y
-            self.phase_shifting = False
-            self.phase_shift_invulnerable = False
-            
-            self.particles.add_particles(
-                self.x + self.width / 2,
-                self.y + self.height / 2,
-                PURPLE,
-                count=30,
-                speed=3,
-                size_range=(2, 6),
-                lifetime_range=(30, 60)
-            )
+            laser = Laser(x, 0, speed, 10, lifetime=self.phase_shift_duration, warning_time=30)
+            self.lasers.append(laser)
+
+    def create_phase_shift_hazards(self):
+       
+        pass
 
     def fire_projectile(self, player, pattern=None):
         if pattern is None:
@@ -593,12 +678,6 @@ class Boss:
         if self.adaptation_display_time > 0:
             self.adaptation_display_time -= 1
             
-        if self.isInCounterStance:
-            self.counterStanceTimer += 1
-            if self.counterStanceTimer >= self.counterStanceDuration:
-                self.isInCounterStance = False
-                self.counterStanceTimer = 0
-            
         if self.projectile_cooldown > 0:
             self.projectile_cooldown -= 1
             
@@ -646,19 +725,6 @@ class Boss:
             if self.hazard_cooldown <= 0:
                 self.create_hazard(player)
                 self.hazard_cooldown = self.hazard_cooldown_max
-        elif self.current_decision == 'counter':
-            if not self.isInCounterStance:
-                self.isInCounterStance = True
-                self.counterStanceTimer = 0
-                self.particles.add_particles(
-                    self.x + self.width / 2,
-                    self.y + self.height / 2,
-                    ORANGE,
-                    count=20,
-                    speed=2,
-                    size_range=(3, 7),
-                    lifetime_range=(40, 60)
-                )
         
         if self.dash_duration > 0:
             self.dash_duration -= 1
@@ -708,6 +774,13 @@ class Boss:
             else:
                 i += 1
                 
+        i = 0
+        while i < len(self.lasers):
+            if self.lasers[i].update():
+                self.lasers.pop(i)
+            else:
+                i += 1
+                
         self.particles.update()
         
         if self.current_decision != 'chase' and self.current_decision != 'retreat' and self.dash_duration <= 0:
@@ -724,22 +797,15 @@ class Boss:
             if len(self.playerAttackPattern) % 5 == 0:
                 self.analyze_player_patterns()
         
-        if self.isInCounterStance:
-            self.current_decision = 'idle'
-            return
-            
-        if self.phase >= 2 and random.random() < 0.15:
+        
+        if self.phase >= 2 and random.random() < 0.25:  
             special_choice = random.random()
-            if special_choice < 0.4:
+            if special_choice < 0.3:  
                 self.current_decision = 'projectile'
                 return
-            elif special_choice < 0.7:
+            elif special_choice < 0.7:  
                 self.current_decision = 'hazard'
                 return
-            else:
-                if self.counter_attacks and random.random() < 0.3:
-                    self.current_decision = 'counter'
-                    return
         
         if distance_to_player < self.attack_distance:
             if self.attack_cooldown <= 0 and random.random() < self.aggression:
@@ -772,7 +838,6 @@ class Boss:
         for key, count in positions.items():
             if count >= 3:  
                 if not any(a['type'] == 'position_preference' for a in self.adaptations):
-                    self.counter_attacks = True
                     self.attack_distance = 80  
                     self.adaptations.append({
                         'type': 'position_preference',
@@ -794,8 +859,6 @@ class Boss:
         player_defense = player.block_count / max(1, self.learning_timer / 60)  
         
         if player_aggression > 0.5 and not any(a['type'] == 'counter_aggression' for a in self.adaptations):
-            self.counter_attacks = True
-            self.isInCounterStance = False
             self.dash_preference += 0.3
             
             self.adaptations.append({
@@ -851,51 +914,51 @@ class Boss:
             player.dash_count = 0
             player.block_count = 0
 
-    def counter_attack(self, player):
-        if self.isInCounterStance and player.attacking:
-            self.isInCounterStance = False
-            self.counterStanceTimer = 0
-            
-            player.take_damage(10)
-            
-            self.particles.add_particles(
-                player.x + player.width / 2,
-                player.y + player.height / 2,
-                ORANGE,
-                count=25,
-                speed=3,
-                size_range=(3, 7),
-                lifetime_range=(30, 50)
-            )
-            
-            knockback_dir = 1 if player.x > self.x else -1
-            player.vel_x = knockback_dir * 15
-            player.vel_y = -5
-            
-            self.attack_cooldown = 0
-            self.dash_cooldown = 0
-            
-            return True
-        return False
-
     def draw(self, surface):
-        if self.phase_shifting:
-            pygame.draw.circle(
-                surface,
-                PURPLE,
-                (int(self.x + self.width / 2), int(self.y + self.height / 2)),
-                int(self.phase_shift_pulse_radius),
-                2  
-            )
-            
-            boss_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-            boss_color = (PURPLE[0], PURPLE[1], PURPLE[2], 150)  
-            pygame.draw.rect(boss_surface, boss_color, (0, 0, self.width, self.height))
-            surface.blit(boss_surface, (self.x, self.y))
+        if not self.is_visible:
+          
+            if self.reappear_portal_active:
+                
+                portal_radius = 50
+                portal_surface = pygame.Surface((portal_radius * 2, portal_radius * 2), pygame.SRCALPHA)
+                
+                for i in range(3):
+                    color_value = max(0, min(255, 128 + int(math.sin(self.reappear_portal_timer * 0.1 + i) * 127)))
+                    color = (color_value, 0, color_value, 150)
+                    
+                    thickness = 3 - i
+                    pygame.draw.circle(
+                        portal_surface,
+                        color,
+                        (portal_radius, portal_radius),
+                        portal_radius - i * 10,
+                        thickness
+                    )
+                
+                
+                for i in range(8):
+                    angle = self.reappear_portal_timer * 0.05 + i * math.pi / 4
+                    length = portal_radius * 0.7
+                    start_x = portal_radius + math.cos(angle) * 15
+                    start_y = portal_radius + math.sin(angle) * 15
+                    end_x = portal_radius + math.cos(angle) * length
+                    end_y = portal_radius + math.sin(angle) * length
+                    
+                    pygame.draw.line(
+                        portal_surface,
+                        (200, 0, 200, 150),
+                        (start_x, start_y),
+                        (end_x, end_y),
+                        2
+                    )
+                
+                
+                surface.blit(
+                    portal_surface,
+                    (self.x + self.width // 2 - portal_radius, self.y + self.height // 2 - portal_radius)
+                )
         else:
-            if self.isInCounterStance:
-                color = ORANGE
-            elif self.invincibility > 0:
+            if self.invincibility > 0:
                 if self.invincibility % 6 < 3:
                     color = RED
                 else:
@@ -914,7 +977,7 @@ class Boss:
                 pygame.draw.circle(surface, BLACK, (int(self.x + 10), int(eye_y)), 2)
         
         attack_rect = self.get_attack_rect()
-        if attack_rect:
+        if attack_rect and self.is_visible:
             pygame.draw.rect(surface, RED, attack_rect)
             
         for projectile in self.projectiles:
@@ -923,17 +986,21 @@ class Boss:
         for hazard in self.hazards:
             hazard.draw(surface)
             
+        for laser in self.lasers:
+            laser.draw(surface)
+            
         self.particles.draw(surface)
         
-        health_width = 50
-        health_height = 5
-        health_x = self.x - (health_width - self.width) / 2
-        health_y = self.y - 10
-        
-        pygame.draw.rect(surface, DARK_GRAY, (health_x, health_y, health_width, health_height))
-        
-        health_percent = max(0, self.health / self.max_health)
-        pygame.draw.rect(surface, RED, (health_x, health_y, health_width * health_percent, health_height))
+        if self.is_visible:
+            health_width = 50
+            health_height = 5
+            health_x = self.x - (health_width - self.width) / 2
+            health_y = self.y - 10
+            
+            pygame.draw.rect(surface, DARK_GRAY, (health_x, health_y, health_width, health_height))
+            
+            health_percent = max(0, self.health / self.max_health)
+            pygame.draw.rect(surface, RED, (health_x, health_y, health_width * health_percent, health_height))
         
         if self.adaptation_display_time > 0:
             text = font_medium.render(self.current_adaptation_text, True, ORANGE)
@@ -946,6 +1013,52 @@ class Boss:
             text_x = SCREEN_WIDTH // 2 - text.get_width() // 2
             text_y = SCREEN_HEIGHT // 2 - 80
             surface.blit(text, (text_x, text_y))
+
+    def update_phase_shift(self):
+        self.phase_shift_timer += 1
+        
+        
+        i = 0
+        while i < len(self.lasers):
+            if self.lasers[i].update():
+                self.lasers.pop(i)
+            else:
+                i += 1
+        
+       
+        if len(self.lasers) < 4 and self.phase_shift_timer % 90 == 0 and self.phase_shift_timer < self.phase_shift_duration - 120:
+            x = random.randint(50, SCREEN_WIDTH - 100)
+            speed = random.choice([-4, -3, 3, 4])
+            laser = Laser(x, 0, speed, 10, lifetime=120, warning_time=30)
+            self.lasers.append(laser)
+        
+        
+        if self.phase_shift_timer >= self.phase_shift_duration - 120 and not self.reappear_portal_active:
+            self.reappear_portal_active = True
+            self.reappear_portal_timer = 0
+        
+        
+        if self.reappear_portal_active:
+            self.reappear_portal_timer += 1
+            if self.reappear_portal_timer >= self.reappear_portal_duration:
+                self.is_visible = True
+                self.phase_shifting = False
+                self.phase_shift_invulnerable = False
+                
+                self.lasers.clear()
+                
+                self.x = random.randint(100, SCREEN_WIDTH - 200)
+                self.y = SCREEN_HEIGHT - 150 - self.height
+                
+                self.particles.add_particles(
+                    self.x + self.width/2,
+                    self.y + self.height/2,
+                    PURPLE,
+                    count=30,
+                    speed=3,
+                    size_range=(3, 8),
+                    lifetime_range=(30, 60)
+                )
 
 class Player:
     def __init__(self, x, y):
@@ -976,12 +1089,16 @@ class Player:
         self.facing_right = True
         self.color = GREEN
         self.particles = ParticleSystem()
-        
+        self.visible_during_dash = False  
         self.attack_count = 0
         self.dash_count = 0
         self.block_count = 0
         self.position_history = []
-        self.position_history_max = 180  
+        self.position_history_max = 180
+        
+      
+        self.dash_warning_shown = False
+        self.dash_warning_timer = 0
 
     def get_rect(self):
         return pygame.Rect(self.x, self.y, self.width, self.height)
@@ -1007,15 +1124,19 @@ class Player:
         return pygame.Rect(block_x, block_y, block_width, block_height)
 
     def take_damage(self, amount):
+
+        if self.dash_duration > 0:
+            return False
+            
         if self.invincibility <= 0:
-            # Check if blocking and block direction matches attack
+           
             block_rect = self.get_block_rect()
             if block_rect:
-                # Blocking reduces damage
+              
                 self.health -= amount // 2
                 self.block_count += 1
                 
-                # Block effect
+             
                 self.particles.add_particles(
                     block_rect.x + block_rect.width // 2,
                     block_rect.y + block_rect.height // 2,
@@ -1026,13 +1147,13 @@ class Player:
                     lifetime_range=(10, 30)
                 )
             else:
-                # Full damage
+           
                 self.health -= amount
                 
             self.invincibility = 60
             hit_sound.play()
             
-            # Hit effect
+         
             self.particles.add_particles(
                 self.x + self.width // 2,
                 self.y + self.height // 2,
@@ -1047,12 +1168,12 @@ class Player:
         return False
 
     def move(self, keys, boss):
-        # Record position for boss learning
+ 
         self.position_history.append((self.x, self.y))
         if len(self.position_history) > self.position_history_max:
             self.position_history.pop(0)
             
-        # Handle timers
+    
         if self.attack_cooldown > 0:
             self.attack_cooldown -= 1
             
@@ -1067,27 +1188,40 @@ class Player:
             if self.attack_duration <= 0:
                 self.attacking = False
                 
-        # Handle dash duration
+       
         if self.dash_duration > 0:
             self.dash_duration -= 1
+            self.visible_during_dash = False  
             
-            # Add dash particles
+           
             self.particles.add_particles(
                 self.x + (0 if self.facing_right else self.width),
                 self.y + self.height // 2,
                 BLUE,
-                count=2,
-                speed=1,
-                size_range=(1, 3),
+                count=3,  
+                speed=2,  
+                size_range=(2, 5), 
                 lifetime_range=(10, 20)
             )
             
-            # Fixed dash velocity
+            
+            self.particles.add_particles(
+                self.x + self.width/2,
+                self.y + self.height/2,
+                (100, 200, 255),  
+                count=2,
+                speed=1,
+                size_range=(3, 6),
+                lifetime_range=(5, 15)
+            )
+            
+           
             self.vel_x = self.dash_speed * (1 if self.facing_right else -1)
         else:
-            # Normal movement
+            self.visible_during_dash = True 
+            
             if not self.attacking and not self.blocking:
-                # Reset velocity
+                
                 self.vel_x = 0
                 
                 if keys[pygame.K_LEFT] or keys[pygame.K_a]:
@@ -1097,13 +1231,13 @@ class Player:
                     self.vel_x = self.speed
                     self.facing_right = True
                     
-        # Jumping
+   
         if (keys[pygame.K_UP] or keys[pygame.K_w] or keys[pygame.K_SPACE]) and self.on_ground and not self.is_jumping:
             self.vel_y = self.jump_power
             self.is_jumping = True
             self.on_ground = False
             
-        # Attack
+    
         if (keys[pygame.K_z] or keys[pygame.K_j]) and not self.attacking and self.attack_cooldown <= 0 and not self.blocking:
             self.attacking = True
             self.attack_duration = self.attack_duration_max
@@ -1111,27 +1245,27 @@ class Player:
             self.attack_count += 1
             player_attack_sound.play()
             
-        # Block
+     
         self.blocking = (keys[pygame.K_x] or keys[pygame.K_k]) and self.on_ground and not self.attacking
         if self.blocking:
-            self.block_count += 0.02  # Partial count per frame
+            self.block_count += 0.02  
             
-        # Dash
+  
         if (keys[pygame.K_c] or keys[pygame.K_l]) and self.dash_cooldown <= 0 and not self.blocking:
             self.dash_duration = self.dash_duration_max
             self.dash_cooldown = self.dash_cooldown_max
             self.dash_count += 1
             player_dash_sound.play()
             
-        # Apply physics
+  
         self.x += self.vel_x
         
-        # Apply gravity
+ 
         if not self.on_ground:
             self.vel_y += self.gravity
             self.y += self.vel_y
         
-        # Check ground collision
+    
         if self.y >= SCREEN_HEIGHT - 100 - self.height:
             self.y = SCREEN_HEIGHT - 100 - self.height
             self.on_ground = True
@@ -1140,86 +1274,96 @@ class Player:
         else:
             self.on_ground = False
             
-        # Keep player within screen bounds
+  
         if self.x < 0:
             self.x = 0
         elif self.x > SCREEN_WIDTH - self.width:
             self.x = SCREEN_WIDTH - self.width
             
-        # Update particles
+   
         self.particles.update()
         
-        # Check collision with boss projectiles
+     
         for projectile in boss.projectiles[:]:
             if projectile.get_rect().colliderect(self.get_rect()):
                 self.take_damage(projectile.damage)
                 boss.projectiles.remove(projectile)
                 
-        # Check collision with hazards
+
         for hazard in boss.hazards:
             if hazard.active and hazard.get_rect().colliderect(self.get_rect()):
                 self.take_damage(hazard.damage)
-                # Only take damage from hazard once per second
+         
                 self.invincibility = max(self.invincibility, 60)
+                
+     
+        for laser in boss.lasers:
+            if laser.active and laser.get_rect().colliderect(self.get_rect()):
+   
+                if self.dash_duration <= 0:
+                    self.take_damage(laser.damage)
+             
+                    self.invincibility = max(self.invincibility, 60)
 
     def draw(self, surface):
-        # Draw player
-        if self.invincibility > 0:
-            # Flashing when hit
-            if self.invincibility % 6 < 3:
-                color = RED
+  
+        if self.visible_during_dash:
+            if self.invincibility > 0:
+            
+                if self.invincibility % 6 < 3:
+                    color = RED
+                else:
+                    color = self.color
             else:
                 color = self.color
-        else:
-            color = self.color
+                
+            pygame.draw.rect(surface, color, (self.x, self.y, self.width, self.height))
             
-        pygame.draw.rect(surface, color, (self.x, self.y, self.width, self.height))
         
-        # Draw player eyes (facing direction)
-        eye_y = self.y + 10
-        if self.facing_right:
-            pygame.draw.circle(surface, WHITE, (int(self.x + self.width - 10), int(eye_y)), 4)
-            pygame.draw.circle(surface, BLACK, (int(self.x + self.width - 10), int(eye_y)), 2)
-        else:
-            pygame.draw.circle(surface, WHITE, (int(self.x + 10), int(eye_y)), 4)
-            pygame.draw.circle(surface, BLACK, (int(self.x + 10), int(eye_y)), 2)
+            eye_y = self.y + 10
+            if self.facing_right:
+                pygame.draw.circle(surface, WHITE, (int(self.x + self.width - 10), int(eye_y)), 4)
+                pygame.draw.circle(surface, BLACK, (int(self.x + self.width - 10), int(eye_y)), 2)
+            else:
+                pygame.draw.circle(surface, WHITE, (int(self.x + 10), int(eye_y)), 4)
+                pygame.draw.circle(surface, BLACK, (int(self.x + 10), int(eye_y)), 2)
             
-        # Draw attack
-        attack_rect = self.get_attack_rect()
-        if attack_rect:
-            pygame.draw.rect(surface, WHITE, attack_rect)
+    
+            attack_rect = self.get_attack_rect()
+            if attack_rect:
+                pygame.draw.rect(surface, WHITE, attack_rect)
             
-        # Draw block
-        block_rect = self.get_block_rect()
-        if block_rect:
-            pygame.draw.rect(surface, BLUE, block_rect)
-            
-        # Draw particles
+     
+            block_rect = self.get_block_rect()
+            if block_rect:
+                pygame.draw.rect(surface, BLUE, block_rect)
+        
+    
         self.particles.draw(surface)
         
-        # Draw health bar
+   
         health_width = 200
         health_height = 20
         health_x = 20
         health_y = 20
         
-        # Draw background
+   
         pygame.draw.rect(surface, DARK_GRAY, (health_x, health_y, health_width, health_height))
         
-        # Draw health
+     
         health_percent = max(0, self.health / self.max_health)
         pygame.draw.rect(surface, GREEN, (health_x, health_y, health_width * health_percent, health_height))
         
-        # Draw health text
+   
         health_text = font_small.render(f"Health: {self.health}/{self.max_health}", True, WHITE)
         surface.blit(health_text, (health_x + 10, health_y + 2))
 
-# Game class
+
 class MirrorKnightsGame:
     def __init__(self):
         self.player = Player(100, SCREEN_HEIGHT - 200)
         self.boss = Boss(SCREEN_WIDTH - 150, SCREEN_HEIGHT - 200)
-        self.game_state = "playing"  # "playing", "game_over", "victory"
+        self.game_state = "playing"  
         self.state_timer = 0
         self.particles = ParticleSystem()
         
@@ -1231,64 +1375,48 @@ class MirrorKnightsGame:
         
     def update(self, keys):
         if self.game_state == "playing":
-            # Update player and boss
+      
             self.player.move(keys, self.boss)
             self.boss.move(self.player)
             
-            # Check player attack collision
+        
             player_attack_rect = self.player.get_attack_rect()
-            if player_attack_rect and player_attack_rect.colliderect(self.boss.get_rect()):
-                # Check if boss counters
-                if not self.boss.counter_attack(self.player):
-                    # Normal hit
-                    self.boss.take_damage(2)
+            if player_attack_rect and player_attack_rect.colliderect(self.boss.get_rect()) and self.boss.is_visible:
+           
+                self.boss.take_damage(5)
                     
-            # Check boss attack collision
+     
             boss_attack_rect = self.boss.get_attack_rect()
             if boss_attack_rect and boss_attack_rect.colliderect(self.player.get_rect()):
                 self.player.take_damage(5)
-                
-            # Check phase shift damage pulse
-            if self.boss.phase_shifting and self.boss.phase_shift_timer == self.boss.phase_shift_duration // 2:
-                # Calculate distance from player to boss
-                dx = self.player.x + self.player.width/2 - (self.boss.x + self.boss.width/2)
-                dy = self.player.y + self.player.height/2 - (self.boss.y + self.boss.height/2)
-                distance = math.sqrt(dx*dx + dy*dy)
-                
-                # If player is within pulse radius, damage them
-                if distance <= self.boss.phase_shift_max_radius:
-                    self.player.take_damage(self.boss.phase_shift_damage)
-                    
-                    # Add pulse particles
-                    for _ in range(20):
-                        angle = random.uniform(0, math.pi * 2)
-                        particle_x = self.boss.x + self.boss.width/2 + math.cos(angle) * distance * random.uniform(0.5, 1.0)
-                        particle_y = self.boss.y + self.boss.height/2 + math.sin(angle) * distance * random.uniform(0.5, 1.0)
-                        
-                        self.particles.add_particles(
-                            particle_x, particle_y,
-                            PURPLE,
-                            count=2,
-                            speed=2,
-                            size_range=(2, 5),
-                            lifetime_range=(20, 40)
-                        )
             
-            # Check game over or victory
+        
+            for laser in self.boss.lasers:
+                if laser.warning_shown and not self.player.dash_warning_shown:
+                    self.player.dash_warning_shown = True
+                    self.player.dash_warning_timer = 180  
+            
+  
+            if self.player.dash_warning_timer > 0:
+                self.player.dash_warning_timer -= 1
+                if self.player.dash_warning_timer <= 0:
+                    self.player.dash_warning_shown = False
+            
+
             if self.player.health <= 0:
                 self.game_state = "game_over"
-                self.state_timer = 180  # 3 seconds
+                self.state_timer = 180  
                 game_over_sound.play()
             elif self.boss.health <= 0:
                 self.game_state = "victory"
-                self.state_timer = 180  # 3 seconds
+                self.state_timer = 180  
                 victory_sound.play()
                 
         elif self.game_state == "game_over" or self.game_state == "victory":
-            # Update end-game timer
+       
             self.state_timer -= 1
             if self.state_timer <= 0:
-                # Add particles for effect
+          
                 if self.game_state == "game_over":
                     for _ in range(50):
                         self.particles.add_particles(
@@ -1300,7 +1428,7 @@ class MirrorKnightsGame:
                             size_range=(3, 8),
                             lifetime_range=(30, 90)
                         )
-                else:  # victory
+                else: 
                     for _ in range(50):
                         self.particles.add_particles(
                             self.boss.x + self.boss.width/2,
@@ -1312,63 +1440,62 @@ class MirrorKnightsGame:
                             lifetime_range=(30, 90)
                         )
                         
-                # Check for restart
+            
                 if keys[pygame.K_r]:
                     self.reset()
         
-        # Update particles
+  
         self.particles.update()
     
     def draw(self, surface):
-        # Draw background
+
         surface.fill(BLACK)
         
-        # Draw floor
+
         pygame.draw.rect(surface, DARK_GRAY, (0, SCREEN_HEIGHT - 100, SCREEN_WIDTH, 100))
         
-        # Draw player and boss
+
         self.player.draw(surface)
         self.boss.draw(surface)
         
-        # Draw particles
+
         self.particles.draw(surface)
         
-        # Draw HUD
-        # Boss health bar
+
         boss_health_width = 200
         boss_health_height = 20
         boss_health_x = SCREEN_WIDTH - boss_health_width - 20
         boss_health_y = 20
         
-        # Draw background
+       
         pygame.draw.rect(surface, DARK_GRAY, (boss_health_x, boss_health_y, boss_health_width, boss_health_height))
         
-        # Draw health
+ 
         boss_health_percent = max(0, self.boss.health / self.boss.max_health)
         pygame.draw.rect(surface, PURPLE, (boss_health_x, boss_health_y, boss_health_width * boss_health_percent, boss_health_height))
         
-        # Draw health text
+
         boss_health_text = font_small.render(f"Boss: {self.boss.health}/{self.boss.max_health}", True, WHITE)
         surface.blit(boss_health_text, (boss_health_x + 10, boss_health_y + 2))
         
-        # Draw boss phase
+  
         phase_text = font_small.render(f"Phase: {self.boss.phase}", True, PURPLE)
         surface.blit(phase_text, (boss_health_x + boss_health_width - 80, boss_health_y + 25))
         
-        # Draw game over or victory screen
+
         if self.game_state == "game_over":
-            # Darken screen
+          
             overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, 150))  # Semi-transparent black
+            overlay.fill((0, 0, 0, 150))  
             surface.blit(overlay, (0, 0))
             
-            # Game Over text
+  
             game_over_text = font_large.render("GAME OVER", True, RED)
             text_x = SCREEN_WIDTH // 2 - game_over_text.get_width() // 2
             text_y = SCREEN_HEIGHT // 2 - 50
             surface.blit(game_over_text, (text_x, text_y))
             
-            # Restart prompt
+         
             if self.state_timer <= 0:
                 restart_text = font_medium.render("Press R to restart", True, WHITE)
                 restart_x = SCREEN_WIDTH // 2 - restart_text.get_width() // 2
@@ -1376,55 +1503,65 @@ class MirrorKnightsGame:
                 surface.blit(restart_text, (restart_x, restart_y))
                 
         elif self.game_state == "victory":
-            # Darken screen
+     
             overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, 150))  # Semi-transparent black
+            overlay.fill((0, 0, 0, 150))  
             surface.blit(overlay, (0, 0))
             
-            # Victory text
+          
             victory_text = font_large.render("VICTORY!", True, GREEN)
             text_x = SCREEN_WIDTH // 2 - victory_text.get_width() // 2
             text_y = SCREEN_HEIGHT // 2 - 50
             surface.blit(victory_text, (text_x, text_y))
             
-            # Restart prompt
+
             if self.state_timer <= 0:
                 restart_text = font_medium.render("Press R to restart", True, WHITE)
                 restart_x = SCREEN_WIDTH // 2 - restart_text.get_width() // 2
                 restart_y = SCREEN_HEIGHT // 2 + 20
                 surface.blit(restart_text, (restart_x, restart_y))
                 
-        # Draw controls help
+ 
         if self.game_state == "playing":
             controls_text = font_small.render("Move: Arrow Keys | Attack: Z | Block: X | Dash: C | Jump: Space", True, LIGHT_GRAY)
             surface.blit(controls_text, (20, SCREEN_HEIGHT - 30))
 
-# Main game loop
+   
+        if self.player.dash_warning_timer > 0:
+            warning_text = font_medium.render("Press C to dash through lasers!", True, YELLOW)
+            warning_x = SCREEN_WIDTH // 2 - warning_text.get_width() // 2
+            warning_y = SCREEN_HEIGHT // 2 - 100
+            
+       
+            if (self.player.dash_warning_timer // 10) % 2 == 0:
+                surface.blit(warning_text, (warning_x, warning_y))
+
+
 def main():
     game = MirrorKnightsGame()
     running = True
     
     while running:
-        # Process events
+      
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
                 pygame.quit()
                 sys.exit()
         
-        # Get keyboard state
+   
         keys = pygame.key.get_pressed()
         
-        # Update game
+ 
         game.update(keys)
         
-        # Draw everything
+    
         game.draw(screen)
         
-        # Update display
+
         pygame.display.flip()
         
-        # Maintain frame rate
+
         clock.tick(FPS)
 
 if __name__ == '__main__':
